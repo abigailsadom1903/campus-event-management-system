@@ -12,9 +12,12 @@ A PHP and MySQL web application for publishing, discovering and registering for 
 - [User Roles](#user-roles)
 - [Technology Stack](#technology-stack)
 - [Project Structure](#project-structure)
+- [Architecture](#architecture)
 - [Database](#database)
+- [Key Implementation Decisions](#key-implementation-decisions)
 - [Installation](#installation)
 - [Security Notes](#security-notes)
+- [Known Limitations](#known-limitations)
 - [Documentation](#documentation)
 - [Author](#author)
 
@@ -89,6 +92,31 @@ campus-event-management-system/
 └── INDIVIDUAL WEB ENGINEERING.pdf
 ```
 
+## Architecture
+
+CEMS is a **page-per-action PHP application** with no framework. Each `.php` file at the project root is either a page (`index.php`, `login.php`, `dashboard.php`, `manage.php`, `my_registrations.php`) or an action handler that processes a form and redirects (`register_for_event.php`, `save_event.php`, `delete_event.php`, `update_profile.php`).
+
+`config.php` is the shared core that every page includes. It provides:
+
+- the MySQL connection (`$conn`)
+- session configuration and the login helpers (`isLoggedIn`, `getCurrentUser`, `requireAuth`, `requireRole`)
+- flash-message helpers, input sanitising, and formatting helpers (dates, times, RM currency)
+
+Typical request flow:
+
+```
+Browser ──▶ page / handler (e.g. register_for_event.php)
+              │  require config.php  (session, $conn, helpers)
+              │  check login + validate input
+              ▼
+           MySQL (cemsindv)
+              │
+              ▼
+   set flash message ──▶ redirect (PRG pattern) ──▶ dashboard.php / index.php
+```
+
+Handlers follow the Post/Redirect/Get pattern, so refreshing a page after submitting does not resubmit the form.
+
 ## Database
 
 Database name: `cemsindv`
@@ -101,6 +129,23 @@ Database name: `cemsindv`
 | `registrations` | Additional registration and payment-tracking table |
 
 Events are linked to their creator, and registrations to both event and user, with cascading foreign keys.
+
+### Design notes
+
+- **ENUM columns** keep role, mode, fee and status values consistent at the database level.
+- **Foreign keys with `ON DELETE CASCADE`** stop orphaned events and registrations when a user or event is removed.
+- **A unique key on (`event_id`, `user_email`)** backs up the application's duplicate-registration check.
+- **Seat availability is computed** from the number of `registered` rows rather than stored as a counter, so it cannot drift out of sync with the registrations table.
+- **`registrations`** has no foreign keys; the registration handler uses `event_registrations`.
+
+## Key Implementation Decisions
+
+- **Prepared statements wherever user input reaches SQL** (`mysqli::prepare` + `bind_param`) to prevent SQL injection.
+- **`password_hash()` / `password_verify()`** for credentials, with `session_regenerate_id(true)` on login.
+- **Session hardening** in `config.php`: `httponly` cookies, `use_only_cookies`, `SameSite=Lax`, a 24-hour session lifetime and periodic ID regeneration.
+- **Ordered registration checks** in `register_for_event.php`: event exists, not already registered, registration still open, seats remaining, then insert. Each failure returns a specific message.
+- **Output escaping** with `htmlspecialchars` when echoing user-supplied text.
+- **A single `getCurrentUser()` source of truth** reloads the user from the database, so role changes take effect and a deleted user's session is cleared.
 
 ## Installation
 
@@ -143,6 +188,17 @@ Events are linked to their creator, and registrations to both event and user, wi
 - The sample SQL file contains demo accounts for local testing. Remove or change them, and use strong passwords, before any real deployment.
 - Do not commit real database credentials to the repository.
 - The helper scripts (`check_tables.php`, `check_columns.php`, `create_tables.php`, `debug_events.php`) are for development only and should be removed or protected in production.
+
+## Known Limitations
+
+This is a coursework project intended for local use. Beyond the notes above, be aware of the following before any real deployment:
+
+- **Demo accounts are created automatically** whenever the login page loads, using a documented password. Remove `createDemoAccounts()` in `login.php`.
+- **Error display is on** (`display_errors = 1`) and the session cookie `secure` flag is off (suitable for `localhost` only). Turn error display off, enable the flag and serve over HTTPS in production.
+- **Seat checking is not atomic.** The capacity check and the insert are separate queries, so two simultaneous registrations for the last seat could both succeed. A transaction with row locking would fix this.
+- **CSRF protection is incomplete.** A token generator exists in `config.php`, but `register_for_event.php` does not verify a token yet (SameSite cookies give partial protection).
+- **Payments are modelled but not processed.** Fee and `pending_payment` fields exist; no payment gateway is integrated.
+- **`isEventOrganizer()` in `config.php` queries an `organizer_id` column**, while the `events` table uses `created_by`. Align them before relying on that helper.
 
 ## Documentation
 
